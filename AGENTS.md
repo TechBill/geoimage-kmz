@@ -78,17 +78,55 @@ set at *runtime*, whereas macOS gets it for free from the `.app` bundle's
 ## PLSS lookup hits live government GIS servers — synchronous, blocks the UI
 
 `query_missouri_plss_section()` / `query_kansas_plss_section()`
-(`urllib.request.urlopen`, 10s timeout) run directly on the Tk main thread
-from `PLSSLookupDialog.fetch_coordinates()`. The cursor changes to "watch"
-but the whole app is frozen until the request returns or times out — that's
+(`urllib.request.urlopen`, 10s timeout, via the shared `_fetch_plss_json()`
+helper) run directly on the Tk main thread from
+`PLSSLookupDialog.fetch_coordinates()`. The cursor changes to "watch" but
+the whole app is frozen until the request returns or times out — that's
 inherent to the current implementation, not a regression if you see it.
 Endpoints are third-party (`gis.mo.gov`, `wfs.ksdot.org`); if either changes
-its schema, lookups fail *silently* into a "No section found" dialog rather
-than crashing — check the `where`-clause field names in
-`extract_corner_coordinate()` / `query_*_plss_section()` first if a lookup
-that used to work stops working (Missouri uses `TWP_NUM`/`TWP_DIR`/
-`RNG_NUM`/`RNG_DIR`/`SEC_NUM`; Kansas uses zero-padded string fields
-`Township`/`Range`/`Section` like `"01S"`/`"41W"`/`"05"`).
+its schema, a genuine schema mismatch surfaces as an empty `features` list
+(→ `None` return → "No section found" dialog) rather than crashing — check
+the `where`-clause field names in `extract_corner_coordinate()` /
+`query_*_plss_section()` first if a lookup that used to work stops working
+(Missouri uses `TWP_NUM`/`TWP_DIR`/`RNG_NUM`/`RNG_DIR`/`SEC_NUM`; Kansas uses
+zero-padded string fields `Township`/`Range`/`Section` like
+`"01S"`/`"41W"`/`"05"`).
+
+### Connection/SSL failures are a *separate* error path from "no match"
+
+As of v2.2, `_fetch_plss_json()` raises `PLSSConnectionError` (not a silent
+`None`) for anything that isn't a clean round-trip: `URLError` (DNS/network
+failure or, if `e.reason` is an `ssl.SSLError`, a cert-verification
+failure), `socket.timeout`, or any other exception while fetching/parsing.
+`query_missouri_plss_section()` / `query_kansas_plss_section()` only return
+`None` for a request that actually reached the server and got zero matching
+features back — that's the one case that should show "No section found".
+`fetch_coordinates()` catches `PLSSConnectionError` separately from the
+generic `Exception` handler and shows a "Connection Error" dialog instead.
+**Do not collapse this back into a bare `except Exception: return None`** —
+that's the exact bug this fixes (a real-world case: a dev machine's
+python.org install had never run "Install Certificates.command", so every
+HTTPS request raised `SSLCertVerificationError`, which the old code
+swallowed and reported as "No section found: T40N R27W S5" even though that
+section exists and the service was working fine — confirmed by hitting the
+ArcGIS endpoint directly with curl).
+
+### Self-healing TLS trust store for distributed copies of the app
+
+Because this is a standalone app that gets copied to other people's
+computers, it can't assume the target machine's Python/OS certificate store
+is set up correctly (this is a known failure mode for python.org Python on
+macOS, and frozen PyInstaller apps in general don't inherit a system trust
+store the way a browser does). `_get_ssl_context()` builds the SSL context
+used for every PLSS request from `certifi.where()` instead of the system
+default, so the app carries its own known-good CA bundle rather than
+depending on whatever's (or isn't) on the host machine. `GeoImage KMZ.spec`
+bundles `certifi`'s package data via `collect_all("certifi")` alongside
+NumPy/Pillow specifically so this works in the frozen build, not just when
+run from source with certifi pip-installed. If `certifi` is unavailable for
+some reason, `_get_ssl_context()` falls back to `ssl.create_default_context()`
+(the old, host-dependent behavior) — don't remove that fallback, but also
+don't rely on it: the whole point of bundling certifi is to not need it.
 
 ## Nothing persists between runs
 
@@ -98,6 +136,22 @@ fields (remembered PLSS form values) are plain instance attributes on
 launch. There is no config file anywhere in this app — no
 `~/Library/Application Support`, no `%APPDATA%`. Don't assume a setting
 "should" survive a restart; it never has.
+
+### `last_plss_corner` is auto-advanced, not just remembered
+
+As of v2.3, a successful fetch in `PLSSLookupDialog.fetch_coordinates()`
+stores `_next_plss_corner(corner)` into `self.app.last_plss_corner`, not the
+corner that was just used. `PLSS_CORNER_ORDER = ["NW", "NE", "SE", "SW"]`
+defines the clockwise cycle (top-left, top-right, bottom-right, bottom-left,
+back to top-left); `_next_plss_corner()` wraps with `% len(...)`. The intent
+is a workflow where a user walks all four corners of one section (or several
+adjacent sections) without re-selecting Corner each time — reopening the
+dialog after fetching NW pre-selects NE, and so on. This still resets on
+app restart along with every other `last_plss_*` field (see above) — it's
+an in-session convenience, not a persisted preference. If you touch the
+corner combobox values/labels, keep `PLSS_CORNER_LABELS` (keyed the same as
+`PLSS_CORNER_ORDER`) as the single source of truth for both the dropdown
+and the auto-advance logic rather than hardcoding the list again.
 
 ## Testing without a full app run
 

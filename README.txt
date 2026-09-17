@@ -33,6 +33,27 @@ Features
   install required to run it
 
 
+What's New in v2.3
+-------------------
+- PLSS Lookup auto-advances to the next corner. After a successful Fetch,
+  reopening PLSS Lookup pre-selects the next corner clockwise (NW -> NE ->
+  SE -> SW -> back to NW), so capturing all four corners of a section is
+  just Fetch/OK four times in a row - only the Section number needs
+  updating when you move to a new section.
+- Version bumped to 2.3 (window title bar, and the macOS app bundle's
+  version info).
+
+What's New in v2.2
+-------------------
+- More reliable PLSS Lookup. The app now bundles its own trusted CA
+  certificate store, so PLSS lookups keep working even on a computer whose
+  own certificate setup is missing or broken - this fixes a "No section
+  found" error that was actually a connection failure being misreported.
+  Connection/timeout/SSL failures now show a distinct "Connection Error"
+  dialog instead of being reported as a missing section.
+- Version bumped to 2.2 (window title bar, and the macOS app bundle's
+  version info).
+
 What's New in v2.1
 -------------------
 - Bigger, easier-to-read help & tip text. The "Controls" panel in the

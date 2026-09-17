@@ -32,6 +32,14 @@ datas += tmp_ret[0]
 binaries += tmp_ret[1]
 hiddenimports += tmp_ret[2]
 
+# Collect certifi's CA bundle so HTTPS PLSS lookups work on any machine this
+# app is copied to, even one whose own Python/OS certificate store is
+# missing or broken (see _get_ssl_context() in geoimage_kmz.py).
+tmp_ret = collect_all("certifi")
+datas += tmp_ret[0]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
+
 # Platform-specific: bundle icon for Windows onefile
 if IS_WINDOWS:
     datas += [("assets\\icon.ico", "assets")]
@@ -121,8 +129,8 @@ else:
             icon=icon_path,
             bundle_identifier=None,
             info_plist={
-                "CFBundleShortVersionString": "2.1",
-                "CFBundleVersion": "2.1",
+                "CFBundleShortVersionString": "2.3",
+                "CFBundleVersion": "2.3",
                 "NSHighResolutionCapable": True,
             },
         )

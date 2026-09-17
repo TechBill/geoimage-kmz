@@ -1,4 +1,4 @@
-# GeoImage KMZ – User Guide (v2.1)
+# GeoImage KMZ – User Guide (v2.3)
 
 ## Overview
 
@@ -8,6 +8,29 @@ aerials, etc.) to real coordinates and export a KMZ overlay for Google Earth
 and other KMZ-compatible tools.
 
 This is for research and visualization. It is not survey-grade GIS.
+
+## What's New in v2.3
+
+- **PLSS Lookup auto-advances to the next corner.** After a successful
+  fetch, reopening PLSS Lookup now pre-selects the *next* corner clockwise
+  (NW → NE → SE → SW → back to NW) instead of repeating the corner you just
+  used. Walking all four corners of a section is now just: Fetch, reopen,
+  Fetch, reopen, Fetch, reopen, Fetch — you only need to bump the Section
+  number when moving to a new section.
+- Version bumped to 2.3 — shown in the window title bar, and (on macOS) in
+  the app bundle's version info.
+
+## What's New in v2.2
+
+- **More reliable PLSS Lookup.** The app now bundles its own trusted CA
+  certificate store, so PLSS lookups keep working even on a computer whose
+  own certificate setup is missing or broken — this fixes a "No section
+  found" error that was actually a connection failure being misreported.
+  Lookup failures now distinguish a **Connection Error** (network/SSL/
+  timeout — your inputs were probably fine) from a genuine **"No section
+  found"** (the server responded, but that section doesn't exist).
+- Version bumped to 2.2 — shown in the window title bar, and (on macOS) in
+  the app bundle's version info.
 
 ## What's New in v2.1
 
@@ -156,9 +179,20 @@ fetch section corner coordinates for **Missouri and Kansas**.
 5. Click **Fetch**
 6. The Latitude/Longitude fields auto-fill; click **OK** to save the point.
 
-**Tip:** The app remembers the last PLSS inputs **during the session** so
-adding multiple corners is faster (you usually only change Section and
-Corner).
+**Tip:** The app remembers the last PLSS inputs **during the session**, and
+after a successful Fetch it automatically advances Corner to the next one
+clockwise (NW → NE → SE → SW → NW …). To capture all four corners of a
+section, just repeat **PLSS Lookup… → Fetch → OK** four times — the Corner
+dropdown is already on the right value each time. Moving to a new section
+still just means updating the Section number.
+
+**"Connection Error" vs "No section found":** if a lookup fails, the app now
+tells you which kind of failure it was. A **Connection Error** means the
+Township/Range/Section you entered are probably fine — the app couldn't
+reach the state's server (no internet, a firewall, or a slow connection).
+Just try again. A **"No section found"** message means the request reached
+the server successfully but that Township/Range/Section combination doesn't
+exist — double check the numbers and directions.
 
 ## Border Mask Feature
 

@@ -15,6 +15,10 @@ Features:
 Dependencies:
 - Pillow (PIL):  python3 -m pip install pillow
 - NumPy (for KMZ): python3 -m pip install numpy
+- certifi (optional, recommended): python3 -m pip install certifi
+  Provides a bundled CA certificate bundle for PLSS HTTPS lookups so they
+  keep working even if the local Python/OS certificate store is missing or
+  broken. The packaged app (see GeoImage KMZ.spec) always bundles this.
 
 Run:
   python3 geoimage_kmz_custom.py
@@ -24,6 +28,8 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import ssl
 import sys
 import tkinter as tk
 import urllib.request
@@ -42,9 +48,14 @@ try:
 except Exception:  # pragma: no cover
     np = None
 
+try:
+    import certifi
+except Exception:  # pragma: no cover
+    certifi = None
+
 
 # Application metadata
-__version__ = "2.1"
+__version__ = "2.3"
 __author__ = "Bill Fleming"
 
 APP_NAME = "GeoImage KMZ"
@@ -68,6 +79,93 @@ class ControlPoint:
     lon: float
 
 
+# Corner cycle order, clockwise starting at top-left - used both to render
+# the Corner dropdown and to auto-advance to the next corner after a fetch.
+PLSS_CORNER_ORDER = ["NW", "NE", "SE", "SW"]
+PLSS_CORNER_LABELS = {
+    "NW": "NW (Top Left)",
+    "NE": "NE (Top Right)",
+    "SE": "SE (Bottom Right)",
+    "SW": "SW (Bottom Left)",
+}
+
+
+def _next_plss_corner(corner: str) -> str:
+    """Next corner clockwise (NW -> NE -> SE -> SW -> NW -> ...)."""
+    try:
+        i = PLSS_CORNER_ORDER.index(corner)
+    except ValueError:
+        return "NW"
+    return PLSS_CORNER_ORDER[(i + 1) % len(PLSS_CORNER_ORDER)]
+
+
+class PLSSConnectionError(Exception):
+    """A PLSS lookup failed to reach/parse the server (network, SSL, timeout).
+
+    Distinct from a lookup that reached the server and got zero matching
+    features back - that's a genuine "no such section" and stays an
+    `Optional[dict]` return of `None`.
+    """
+    pass
+
+
+_ssl_context: Optional[ssl.SSLContext] = None
+
+
+def _get_ssl_context() -> ssl.SSLContext:
+    """Return an SSL context backed by this app's own CA bundle.
+
+    This app is distributed as a standalone build (PyInstaller) that can end
+    up on a machine whose system/Python certificate store is missing or
+    broken - the exact failure that caused "No section found" errors here:
+    urllib silently failed SSL verification and the lookup functions turned
+    that into an empty result. Bundling certifi's CA bundle (see
+    `GeoImage KMZ.spec`) and using it explicitly means every copy of the app
+    carries a known-good trust store, so this fixes itself on any computer
+    it's copied to - no "Install Certificates.command" step required.
+    Falls back to the system default if certifi isn't available.
+    """
+    global _ssl_context
+    if _ssl_context is None:
+        try:
+            _ssl_context = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _ssl_context = ssl.create_default_context()
+    return _ssl_context
+
+
+def _fetch_plss_json(url: str, service_name: str) -> dict:
+    """GET `url` and return parsed JSON, or raise PLSSConnectionError.
+
+    Distinguishes *why* the request failed so the UI can tell the user
+    "this is a connection problem" instead of the misleading "no section
+    found" it would otherwise show for a network/SSL failure.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=10, context=_get_ssl_context()) as response:
+            return json.loads(response.read().decode('utf-8'))
+    except urllib.error.URLError as e:
+        print(f"PLSS query error ({service_name}): {e}")
+        if isinstance(e.reason, ssl.SSLError):
+            raise PLSSConnectionError(
+                f"Could not establish a secure connection to the {service_name} PLSS server "
+                "(SSL certificate verification failed)."
+            ) from e
+        raise PLSSConnectionError(
+            f"Could not reach the {service_name} PLSS server. Check your internet connection."
+        ) from e
+    except socket.timeout as e:
+        print(f"PLSS query error ({service_name}): {e}")
+        raise PLSSConnectionError(
+            f"The {service_name} PLSS server did not respond in time (timed out)."
+        ) from e
+    except Exception as e:
+        print(f"PLSS query error ({service_name}): {e}")
+        raise PLSSConnectionError(
+            f"Unexpected error querying the {service_name} PLSS server: {e}"
+        ) from e
+
+
 def query_missouri_plss_section(township: int, township_dir: str, range_num: int, range_dir: str, section: int) -> Optional[dict]:
     """Query Missouri MSDIS PLSS web service for section geometry.
 
@@ -78,40 +176,35 @@ def query_missouri_plss_section(township: int, township_dir: str, range_num: int
         range_dir: Range direction (E/W)
         section: Section number (1-36)
 
-    Returns: dict with 'geometry' (polygon rings) or None on failure
+    Returns: dict with 'geometry' (polygon rings) or None if no section matches.
+    Raises: PLSSConnectionError if the server couldn't be reached/parsed.
     """
-    try:
-        # Missouri Department of Agriculture PLSS FeatureServer (Layer 0)
-        base_url = "https://gis.mo.gov/arcgis/rest/services/MDA/PLSS/FeatureServer/0/query"
+    # Missouri Department of Agriculture PLSS FeatureServer (Layer 0)
+    base_url = "https://gis.mo.gov/arcgis/rest/services/MDA/PLSS/FeatureServer/0/query"
 
-        # Build WHERE clause using Missouri's field names
-        # TWP_NUM, TWP_DIR, RNG_NUM, RNG_DIR, SEC_NUM
-        where = (f"TWP_NUM = {township} AND TWP_DIR = '{township_dir}' AND "
-                f"RNG_NUM = {range_num} AND RNG_DIR = '{range_dir}' AND "
-                f"SEC_NUM = {section}")
+    # Build WHERE clause using Missouri's field names
+    # TWP_NUM, TWP_DIR, RNG_NUM, RNG_DIR, SEC_NUM
+    where = (f"TWP_NUM = {township} AND TWP_DIR = '{township_dir}' AND "
+            f"RNG_NUM = {range_num} AND RNG_DIR = '{range_dir}' AND "
+            f"SEC_NUM = {section}")
 
-        params = {
-            'where': where,
-            'outFields': 'TWP_NUM,TWP_DIR,RNG_NUM,RNG_DIR,SEC_NUM,LABEL_,GRANT_NAME',
-            'returnGeometry': 'true',
-            'f': 'json',
-            'outSR': '4326'  # WGS84 lat/lon
-        }
+    params = {
+        'where': where,
+        'outFields': 'TWP_NUM,TWP_DIR,RNG_NUM,RNG_DIR,SEC_NUM,LABEL_,GRANT_NAME',
+        'returnGeometry': 'true',
+        'f': 'json',
+        'outSR': '4326'  # WGS84 lat/lon
+    }
 
-        query_string = urllib.parse.urlencode(params)
-        url = f"{base_url}?{query_string}"
+    query_string = urllib.parse.urlencode(params)
+    url = f"{base_url}?{query_string}"
 
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
+    data = _fetch_plss_json(url, "Missouri")
 
-        if 'features' in data and len(data['features']) > 0:
-            return data['features'][0]
+    if 'features' in data and len(data['features']) > 0:
+        return data['features'][0]
 
-        return None
-
-    except Exception as e:
-        print(f"PLSS query error: {e}")
-        return None
+    return None
 
 
 def query_kansas_plss_section(township: int, township_dir: str, range_num: int, range_dir: str, section: int) -> Optional[dict]:
@@ -124,45 +217,40 @@ def query_kansas_plss_section(township: int, township_dir: str, range_num: int, 
         range_dir: Range direction (E/W)
         section: Section number (1-36)
 
-    Returns: dict with 'geometry' (polygon rings) or None on failure
+    Returns: dict with 'geometry' (polygon rings) or None if no section matches.
+    Raises: PLSSConnectionError if the server couldn't be reached/parsed.
     """
-    try:
-        # Kansas Department of Transportation PLSS MapServer (Layer 0)
-        base_url = "https://wfs.ksdot.org/arcgis_web_adaptor/rest/services/Boundaries/PLSS/MapServer/0/query"
+    # Kansas Department of Transportation PLSS MapServer (Layer 0)
+    base_url = "https://wfs.ksdot.org/arcgis_web_adaptor/rest/services/Boundaries/PLSS/MapServer/0/query"
 
-        # Build WHERE clause using Kansas's field names
-        # Township format: "01S" (number + direction)
-        # Range format: "41W" (number + direction)
-        # Section format: "05" (number only)
-        township_str = f"{township:02d}{township_dir}"
-        range_str = f"{range_num:02d}{range_dir}"
-        section_str = f"{section:02d}"
+    # Build WHERE clause using Kansas's field names
+    # Township format: "01S" (number + direction)
+    # Range format: "41W" (number + direction)
+    # Section format: "05" (number only)
+    township_str = f"{township:02d}{township_dir}"
+    range_str = f"{range_num:02d}{range_dir}"
+    section_str = f"{section:02d}"
 
-        where = (f"Township = '{township_str}' AND Range = '{range_str}' AND "
-                f"Section = '{section_str}'")
+    where = (f"Township = '{township_str}' AND Range = '{range_str}' AND "
+            f"Section = '{section_str}'")
 
-        params = {
-            'where': where,
-            'outFields': 'Township,Range,Section,TownshipRangeSection',
-            'returnGeometry': 'true',
-            'f': 'json',
-            'outSR': '4326'  # WGS84 lat/lon
-        }
+    params = {
+        'where': where,
+        'outFields': 'Township,Range,Section,TownshipRangeSection',
+        'returnGeometry': 'true',
+        'f': 'json',
+        'outSR': '4326'  # WGS84 lat/lon
+    }
 
-        query_string = urllib.parse.urlencode(params)
-        url = f"{base_url}?{query_string}"
+    query_string = urllib.parse.urlencode(params)
+    url = f"{base_url}?{query_string}"
 
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
+    data = _fetch_plss_json(url, "Kansas")
 
-        if 'features' in data and len(data['features']) > 0:
-            return data['features'][0]
+    if 'features' in data and len(data['features']) > 0:
+        return data['features'][0]
 
-        return None
-
-    except Exception as e:
-        print(f"PLSS query error: {e}")
-        return None
+    return None
 
 
 def extract_corner_coordinate(geometry: dict, corner: str) -> Optional[tuple[float, float]]:
@@ -312,18 +400,10 @@ class PLSSLookupDialog(simpledialog.Dialog):
         )
 
         tk.Label(master, text="Select:").grid(row=11, column=0, sticky="w", padx=(20, 6), pady=4)
-        # Map corner abbreviation to full display text
-        corner_map = {
-            "NW": "NW (Top Left)",
-            "NE": "NE (Top Right)",
-            "SE": "SE (Bottom Right)",
-            "SW": "SW (Bottom Left)"
-        }
-        init_corner_display = corner_map.get(init_corner, "NW (Top Left)")
+        init_corner_display = PLSS_CORNER_LABELS.get(init_corner, PLSS_CORNER_LABELS["NW"])
         self.corner_var = tk.StringVar(value=init_corner_display)
         corner_combo = ttk.Combobox(master, textvariable=self.corner_var,
-                                    values=["NW (Top Left)", "NE (Top Right)",
-                                           "SE (Bottom Right)", "SW (Bottom Left)"],
+                                    values=[PLSS_CORNER_LABELS[c] for c in PLSS_CORNER_ORDER],
                                     width=20, state="readonly")
         corner_combo.grid(row=11, column=1, sticky="w", padx=6, pady=4)
 
@@ -419,7 +499,9 @@ class PLSSLookupDialog(simpledialog.Dialog):
                 self.app.last_plss_range = str(range_num)
                 self.app.last_plss_range_dir = range_dir
                 self.app.last_plss_section = str(section)
-                self.app.last_plss_corner = corner
+                # Auto-advance to the next corner clockwise so re-opening PLSS
+                # Lookup for the same section only requires bumping Section.
+                self.app.last_plss_corner = _next_plss_corner(corner)
 
             self.result = coord
             self.config(cursor="")
@@ -427,6 +509,13 @@ class PLSSLookupDialog(simpledialog.Dialog):
 
         except ValueError:
             messagebox.showerror("Invalid Input", "Please enter valid numeric values for Township, Range, and Section.")
+        except PLSSConnectionError as e:
+            self.config(cursor="")
+            messagebox.showerror("Connection Error",
+                                f"{e}\n\n"
+                                "Your Township/Range/Section values may be fine - this looks "
+                                "like a network problem reaching the state PLSS server, not a "
+                                "missing section.")
         except Exception as e:
             self.config(cursor="")
             messagebox.showerror("Error", f"An error occurred during PLSS lookup:\n\n{str(e)}")
