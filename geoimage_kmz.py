@@ -26,6 +26,7 @@ Run:
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import socket
@@ -55,7 +56,7 @@ except Exception:  # pragma: no cover
 
 
 # Application metadata
-__version__ = "2.3"
+__version__ = "2.5"
 __author__ = "Bill Fleming"
 
 APP_NAME = "GeoImage KMZ"
@@ -88,6 +89,12 @@ PLSS_CORNER_LABELS = {
     "SE": "SE (Bottom Right)",
     "SW": "SW (Bottom Left)",
 }
+
+EXPORT_ORIGINAL = "original"
+EXPORT_MOBILE_OPTIMIZED = "mobile_optimized"
+EXPORT_MOBILE_TILED = "mobile_tiled"
+MOBILE_MAX_DIMENSION = 4096
+MOBILE_TILE_SIZE = 2048
 
 
 def _next_plss_corner(corner: str) -> str:
@@ -653,6 +660,65 @@ class LatLonDialog(simpledialog.Dialog):
 
         self.result = (lat, lon)
         return True
+
+
+class KMZExportOptionsDialog(simpledialog.Dialog):
+    """Choose how the overlay image is packaged for Google Earth."""
+
+    def __init__(self, parent: tk.Tk):
+        self.mode_var = tk.StringVar(value=EXPORT_ORIGINAL)
+        self.result: Optional[str] = None
+        super().__init__(parent, title="KMZ Export Options")
+
+    def body(self, master: tk.Frame):
+        tk.Label(
+            master,
+            text="Choose how to package the image in this KMZ:",
+            font=("Helvetica", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=8, pady=(10, 8))
+
+        options = [
+            (
+                EXPORT_ORIGINAL,
+                "Standard export (original resolution)",
+                "Maximum detail. Very large images may flicker or break up on mobile devices.",
+            ),
+            (
+                EXPORT_MOBILE_OPTIMIZED,
+                "Mobile optimized (recommended)",
+                f"Scales the longest side to at most {MOBILE_MAX_DIMENSION} pixels. Keeps border transparency.",
+            ),
+            (
+                EXPORT_MOBILE_TILED,
+                "Mobile high detail (tiled)",
+                f"Keeps the original resolution and divides it into {MOBILE_TILE_SIZE}-pixel PNG tiles.",
+            ),
+        ]
+
+        for value, title, description in options:
+            option_frame = tk.Frame(master)
+            option_frame.pack(fill="x", padx=8, pady=4)
+            tk.Radiobutton(
+                option_frame,
+                text=title,
+                variable=self.mode_var,
+                value=value,
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                option_frame,
+                text=description,
+                fg="gray",
+                justify="left",
+                wraplength=420,
+                anchor="w",
+            ).pack(fill="x", padx=(24, 0))
+
+        return None
+
+    def apply(self):
+        self.result = self.mode_var.get()
 
 
 class GeoImageKMZApp(tk.Tk):
@@ -1807,6 +1873,58 @@ class GeoImageKMZApp(tk.Tk):
         lon = float(A_lon @ v)
         return lat, lon
 
+    def _prepare_kmz_image(self) -> Image.Image:
+        """Return an export-ready copy with the optional border mask applied."""
+        img = self._pil_image.copy()
+        w, h = img.size
+
+        if self.border_points and len(self.border_points) >= 3:
+            if img.mode != "RGBA":
+                img = img.convert("RGBA")
+
+            from PIL import ImageDraw
+            mask = Image.new("L", (w, h), 0)
+            draw = ImageDraw.Draw(mask)
+            draw.polygon(self.border_points, fill=255, outline=255)
+            img.putalpha(mask)
+        elif img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+
+        return img
+
+    def _ground_overlay_kml(self, name: str, href: str, corners_ll) -> str:
+        """Build one ground-overlay element from lower-left-first corners."""
+        coord_str = "\n".join(
+            f"{lon:.8f},{lat:.8f}" for (lat, lon) in corners_ll
+        )
+        return f"""    <GroundOverlay>
+      <name>{html.escape(name)}</name>
+      <drawOrder>100</drawOrder>
+      <Icon>
+        <href>{html.escape(href)}</href>
+      </Icon>
+      <altitude>0</altitude>
+      <altitudeMode>clampToGround</altitudeMode>
+      <gx:LatLonQuad>
+        <coordinates>
+{coord_str}
+        </coordinates>
+      </gx:LatLonQuad>
+    </GroundOverlay>"""
+
+    def _corners_for_pixel_bounds(self, A_lat, A_lon, x0, y0, x1, y1):
+        """Return KML quad corners for an image rectangle, starting lower-left."""
+        corners_px = [
+            (float(x0), float(y1)),
+            (float(x1), float(y1)),
+            (float(x1), float(y0)),
+            (float(x0), float(y0)),
+        ]
+        return [
+            self._latlon_for_pixel(A_lat, A_lon, x, y)
+            for (x, y) in corners_px
+        ]
+
     def generate_kmz(self) -> None:
         if not self._pil_image or not self.image_path:
             messagebox.showinfo("No image", "Load an image first.")
@@ -1826,8 +1944,11 @@ class GeoImageKMZApp(tk.Tk):
         A_lat, A_lon = fitted
 
         w, h = self._pil_image.size
-        corners_px = [(0.0, float(h)), (float(w), float(h)), (float(w), 0.0), (0.0, 0.0)]
-        corners_ll = [self._latlon_for_pixel(A_lat, A_lon, x, y) for (x, y) in corners_px]
+
+        options_dialog = KMZExportOptionsDialog(self)
+        export_mode = options_dialog.result
+        if not export_mode:
+            return
 
         base = os.path.splitext(os.path.basename(self.image_path))[0]
         out_path = filedialog.asksaveasfilename(
@@ -1840,69 +1961,73 @@ class GeoImageKMZApp(tk.Tk):
         if not out_path:
             return
 
-        coord_str = "\n".join([f"{lon:.8f},{lat:.8f},0" for (lat, lon) in corners_ll])
+        try:
+            import io
 
-        # Preserve original filename (with .png extension for KMZ)
-        original_filename = os.path.basename(self.image_path)
-        image_filename = os.path.splitext(original_filename)[0] + ".png"
+            img = self._prepare_kmz_image()
+            overlays = []
+            tile_count = 0
 
-        kml = f"""<?xml version="1.0" encoding="UTF-8"?>
+            with ZipFile(out_path, "w", compression=ZIP_DEFLATED) as z:
+                if export_mode == EXPORT_MOBILE_TILED:
+                    for y0 in range(0, h, MOBILE_TILE_SIZE):
+                        y1 = min(y0 + MOBILE_TILE_SIZE, h)
+                        for x0 in range(0, w, MOBILE_TILE_SIZE):
+                            x1 = min(x0 + MOBILE_TILE_SIZE, w)
+                            tile = img.crop((x0, y0, x1, y1))
+
+                            # A border mask can leave complete tiles invisible.
+                            if tile.mode == "RGBA" and tile.getchannel("A").getbbox() is None:
+                                continue
+
+                            row = y0 // MOBILE_TILE_SIZE
+                            col = x0 // MOBILE_TILE_SIZE
+                            image_filename = f"tiles/tile_{row}_{col}.png"
+                            png_bytes = io.BytesIO()
+                            tile.save(png_bytes, format="PNG")
+                            z.writestr(image_filename, png_bytes.getvalue())
+
+                            corners_ll = self._corners_for_pixel_bounds(
+                                A_lat, A_lon, x0, y0, x1, y1
+                            )
+                            overlays.append(
+                                self._ground_overlay_kml(
+                                    f"{base} tile {row + 1},{col + 1}",
+                                    image_filename,
+                                    corners_ll,
+                                )
+                            )
+                            tile_count += 1
+                else:
+                    if export_mode == EXPORT_MOBILE_OPTIMIZED and max(w, h) > MOBILE_MAX_DIMENSION:
+                        scale = MOBILE_MAX_DIMENSION / max(w, h)
+                        new_size = (
+                            max(1, round(w * scale)),
+                            max(1, round(h * scale)),
+                        )
+                        img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+                    image_filename = "overlay.png"
+                    png_bytes = io.BytesIO()
+                    img.save(png_bytes, format="PNG")
+                    z.writestr(image_filename, png_bytes.getvalue())
+                    corners_ll = self._corners_for_pixel_bounds(
+                        A_lat, A_lon, 0, 0, w, h
+                    )
+                    overlays.append(
+                        self._ground_overlay_kml(base, image_filename, corners_ll)
+                    )
+
+                kml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">
   <Document>
-    <name>{base} overlay</name>
+    <name>{html.escape(base)} overlay</name>
     <description></description>
-    <GroundOverlay>
-      <name>{base}</name>
-      <Icon>
-        <href>{image_filename}</href>
-      </Icon>
-      <gx:LatLonQuad>
-        <coordinates>
-{coord_str}
-        </coordinates>
-      </gx:LatLonQuad>
-    </GroundOverlay>
+{chr(10).join(overlays)}
   </Document>
 </kml>
 """
-
-        img = self._pil_image.copy()
-
-        # Apply border mask if border exists
-        if self.border_points and len(self.border_points) >= 3:
-            # Convert to RGBA to support transparency
-            if img.mode != "RGBA":
-                img = img.convert("RGBA")
-
-            # Create a mask from the border polygon
-            from PIL import ImageDraw
-            mask = Image.new('L', (w, h), 0)  # Black (transparent)
-            draw = ImageDraw.Draw(mask)
-
-            # Convert border points to PIL polygon format (flat list of coordinates)
-            polygon_coords = []
-            for px, py in self.border_points:
-                polygon_coords.extend([px, py])
-
-            # Draw filled polygon on mask (white = opaque)
-            draw.polygon(polygon_coords, fill=255, outline=255)
-
-            # Apply mask to alpha channel
-            img.putalpha(mask)
-        else:
-            # No border: ensure image is in a format suitable for PNG
-            if img.mode not in ("RGB", "RGBA"):
-                img = img.convert("RGB")
-
-        import io
-        png_bytes = io.BytesIO()
-        img.save(png_bytes, format="PNG")
-        png_data = png_bytes.getvalue()
-
-        try:
-            with ZipFile(out_path, "w", compression=ZIP_DEFLATED) as z:
                 z.writestr("doc.kml", kml)
-                z.writestr(image_filename, png_data)
         except Exception as e:
             messagebox.showerror("Write failed", f"Could not write KMZ.\n\n{e}")
             return
@@ -1910,8 +2035,18 @@ class GeoImageKMZApp(tk.Tk):
         # Remember the directory for next save during this session
         self.last_kmz_dir = os.path.dirname(out_path)
 
+        if export_mode == EXPORT_MOBILE_TILED:
+            export_summary = f"Mobile high detail: {tile_count} PNG tiles"
+        elif export_mode == EXPORT_MOBILE_OPTIMIZED:
+            export_summary = f"Mobile optimized: {img.size[0]} x {img.size[1]} pixels"
+        else:
+            export_summary = f"Original resolution: {w} x {h} pixels"
+
         self.status_var.set(f"KMZ saved: {os.path.basename(out_path)}")
-        messagebox.showinfo("KMZ created", f"Saved KMZ:\n{out_path}\n\nOpen it in Google Earth Pro.")
+        messagebox.showinfo(
+            "KMZ created",
+            f"Saved KMZ:\n{out_path}\n\n{export_summary}\n\nOpen it in Google Earth.",
+        )
 
 
 def main() -> None:

@@ -129,8 +129,8 @@ else:
             icon=icon_path,
             bundle_identifier=None,
             info_plist={
-                "CFBundleShortVersionString": "2.3",
-                "CFBundleVersion": "2.3",
+                "CFBundleShortVersionString": "2.5",
+                "CFBundleVersion": "2.5",
                 "NSHighResolutionCapable": True,
             },
         )

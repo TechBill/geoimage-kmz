@@ -1,4 +1,4 @@
-# GeoImage KMZ – User Guide (v2.3)
+# GeoImage KMZ – User Guide (v2.5)
 
 ## Overview
 
@@ -107,7 +107,17 @@ the use of this software.
    Use *Create Border Mask* (automatic) or *Draw Border* (manual) to hide
    map margins.
 5. **Generate KMZ…**
-   Save a KMZ and open it in Google Earth / Google Earth Pro.
+   Choose an export profile, save the KMZ, and open it in Google Earth /
+   Google Earth Pro:
+   - **Standard export (original resolution)** is the default and matches
+     the traditional export behavior.
+   - **Mobile optimized** limits the longest image side to 4096 pixels.
+   - **Mobile high detail (tiled)** preserves the original resolution in
+     2048-pixel PNG tiles.
+
+   All three modes preserve an optional border mask. The mobile profiles
+   are available for unusually large images; Google Earth display-layer
+   settings can also affect how overlays render on mobile devices.
 
 ## Viewer Controls
 
@@ -244,11 +254,12 @@ Desktop.
 A KMZ is a zip-like container. Each generated KMZ contains:
 
 - `doc.kml` (the KML definition)
-- your overlay image stored inside the KMZ
+- one `overlay.png` image for Standard and Mobile optimized exports, or
+  one or more PNG files under `tiles/` for Mobile high-detail exports
 
-The overlay image inside the KMZ uses the **same base filename** as your
-input image (saved as PNG). This makes it easier if you unzip/organize
-overlays manually.
+The app converts the exported overlay image to PNG so an optional border
+mask can retain transparency. In tiled mode, tiles that are completely
+transparent are left out of the KMZ.
 
 **Tip:** You can rename `.kmz` to `.zip` and unzip it to inspect contents.
 

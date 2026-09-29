@@ -24,11 +24,27 @@ This is a research/visualization tool — it is **not** survey-grade GIS.
   fetch section-corner coordinates directly instead of typing them
 - **Border Mask** — hide map margins/legends so overlays sit edge-to-edge
   cleanly in Google Earth
+- **Export Profiles** — choose the standard full-resolution export, a
+  mobile-optimized 4096-pixel export, or a full-resolution tiled export;
+  border-mask transparency is preserved in every mode
 - Save/Load control points as JSON, so an overlay can be revisited or
   refined later
 - Rotate image (90° / 180° / 270°)
 - Packaged as a standalone desktop app for Windows and macOS — no Python
   install required to run it
+
+## What's new in v2.5
+
+- **KMZ export profiles.** Every export now offers three choices:
+  **Standard export** (the default, preserving the original resolution),
+  **Mobile optimized** (limits the longest side to 4096 pixels), and
+  **Mobile high detail** (splits the original image into 2048-pixel PNG
+  tiles).
+- Border masks and transparency are preserved when images are resized or
+  tiled. Fully transparent tiles are omitted from tiled KMZ files.
+- Generated ground overlays now include an explicit draw order and
+  clamp-to-ground mode.
+- Version bumped to 2.5 in the window title and macOS bundle metadata.
 
 ## What's new in v2.3
 
